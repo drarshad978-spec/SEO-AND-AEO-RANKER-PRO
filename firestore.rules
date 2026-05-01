@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helper Functions ---
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Schema Validations ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'lastActive', 'createdAt']) &&
+             data.keys().size() >= 4 && data.keys().size() <= 8 &&
+             data.uid == request.auth.uid &&
+             data.email == request.auth.token.email &&
+             data.uid is string && data.uid.size() <= 128 &&
+             data.email is string && data.email.size() <= 256 &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 256)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512));
+    }
+
+    function isValidSEOLog(data) {
+      return data.keys().hasAll(['userId', 'action', 'input', 'result', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.userId == request.auth.uid &&
+             data.action is string && data.action.size() <= 64 &&
+             data.result is string && data.result.size() <= 1048576 && // 1MB limit check
+             data.createdAt == request.time &&
+             data.input is map;
+    }
+
+    function isValidShare(data) {
+      return data.keys().hasAll(['userId', 'result', 'createdAt', 'action']) &&
+             data.keys().size() == 4 &&
+             data.userId == request.auth.uid &&
+             data.result is string && data.result.size() <= 1048576 &&
+             data.createdAt == request.time &&
+             data.action is string && data.action.size() <= 64;
+    }
+
+    // --- Collection Matches ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && isValidUser(incoming()) && (
+        // Action: Update profile or brand voice
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'lastActive', 'brandVoice'])
+      );
+    }
+
+    match /seoLogs/{logId} {
+      allow get: if isOwner(existing().userId) && isValidId(logId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isVerified() && isValidId(logId) && isValidSEOLog(incoming());
+      allow delete: if isOwner(existing().userId) && isValidId(logId);
+    }
+
+    match /shares/{shareId} {
+      // Public read access for shared reports
+      allow get: if isValidId(shareId);
+      // Only verified users can create shares
+      allow create: if isVerified() && isValidId(shareId) && isValidShare(incoming());
+      // Only owner can delete their shared reports (not specifically used in app yet but good practice)
+      allow delete: if isOwner(existing().userId) && isValidId(shareId);
+    }
+  }
+}
